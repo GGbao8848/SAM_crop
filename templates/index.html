@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive SAM Segmentation</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Interactive SAM Segmentation</h1>
+            <div class="controls">
+                <select id="modelSelect" class="model-select">
+                    <option value="" disabled selected>Loading models...</option>
+                </select>
+                <div class="dir-input-group">
+                    <input type="text" id="dirInput" placeholder="/path/to/images" class="input-text">
+                    <button id="btnLoadDir" class="btn primary">Load</button>
+                </div>
+
+                <div class="mode-switch">
+                    <button id="btnPoint" class="btn active" onclick="setMode('point')">Point Mode</button>
+                    <button id="btnBox" class="btn" onclick="setMode('box')">Box Mode</button>
+                </div>
+
+                <button id="btnUndo" class="btn secondary">Undo</button>
+                <button id="btnClear" class="btn secondary">Clear</button>
+                <button id="btnCrop" class="btn success">Save Crop</button>
+                <button id="btnSaveAll" class="btn warning">Save All</button>
+                <button id="btnSettings" class="btn secondary" title="Settings">⚙️</button>
+            </div>
+        </header>
+
+        <main>
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <h3>Images</h3>
+                    <button id="btnSort" class="btn-icon" title="Sort">⬇️</button>
+                </div>
+                <ul id="fileList">
+                    <!-- Files will be listed here -->
+                </ul>
+            </div>
+            <div class="canvas-container" id="canvasContainer">
+                <div class="placeholder">Load a directory to start</div>
+                <canvas id="imageCanvas"></canvas>
+                <canvas id="maskCanvas"></canvas>
+                <canvas id="interactionCanvas"></canvas>
+            </div>
+        </main>
+
+        <div id="loading" class="hidden">Processing...</div>
+    </div>
+
+    <!-- Result Modal -->
+    <div id="resultModal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close" id="closeResultModal">&times;</span>
+            <h2>Cropped Result</h2>
+            <div class="result-image-container">
+                <img id="resultImage" src="" alt="Cropped Result">
+            </div>
+            <a id="downloadLink" class="btn primary" download="crop.png">Download</a>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal hidden">
+        <div class="modal-content settings-content">
+            <span class="close" id="closeSettingsModal">&times;</span>
+            <h2>Settings</h2>
+            <div class="setting-group">
+                <label for="shortcutPrev">Previous Image:</label>
+                <input type="text" id="shortcutPrev" class="input-text" readonly placeholder="Press a key...">
+            </div>
+            <div class="setting-group">
+                <label for="shortcutNext">Next Image:</label>
+                <input type="text" id="shortcutNext" class="input-text" readonly placeholder="Press a key...">
+            </div>
+            <div class="setting-actions">
+                <button id="btnSaveSettings" class="btn primary">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/main.js"></script>
+</body>
+
+</html>
