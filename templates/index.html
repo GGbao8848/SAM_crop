@@ -23,6 +23,14 @@
                     <button id="btnLoadDir" class="btn primary">Load</button>
                 </div>
 
+                <div class="save-mode-group">
+                    <label><input type="radio" name="saveMode" value="crop" checked> Crop</label>
+                    <label><input type="radio" name="saveMode" value="mask"> Mask</label>
+                    <label><input type="radio" name="saveMode" value="bbox"> BBox</label>
+                </div>
+
+                <input type="text" id="classLabel" placeholder="Class Label" class="input-text" style="width: 120px;">
+
                 <div class="mode-switch">
                     <button id="btnPoint" class="btn active" onclick="setMode('point')">Point Mode</button>
                     <button id="btnBox" class="btn" onclick="setMode('box')">Box Mode</button>

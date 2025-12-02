@@ -128,11 +128,46 @@ def segment():
         print(f"Inference error: {e}")
         return jsonify({'error': str(e)}), 500
 
+def mask_to_yolo(mask):
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polygons = []
+    h, w = mask.shape
+    for cnt in contours:
+        if cv2.contourArea(cnt) > 10: # Filter small noise
+            polygon = []
+            for point in cnt:
+                x, y = point[0]
+                polygon.append(x / w)
+                polygon.append(y / h)
+            polygons.append(polygon)
+    return polygons
+
+def mask_to_yolo_bbox(mask):
+    """Convert mask to YOLO bbox format: x_center y_center width height (normalized)"""
+    h, w = mask.shape
+    y_indices, x_indices = np.where(mask > 0)
+    
+    if len(y_indices) == 0:
+        return None
+    
+    x_min, x_max = x_indices.min(), x_indices.max()
+    y_min, y_max = y_indices.min(), y_indices.max()
+    
+    # Calculate YOLO format
+    x_center = ((x_min + x_max) / 2) / w
+    y_center = ((y_min + y_max) / 2) / h
+    width = (x_max - x_min) / w
+    height = (y_max - y_min) / h
+    
+    return [x_center, y_center, width, height]
+
 @app.route('/api/crop', methods=['POST'])
 def crop_image():
     data = request.json
     image_path = data.get('image_path')
     mask_data = data.get('mask')
+    save_mode = data.get('save_mode', 'crop') # 'crop' or 'mask'
+    label = data.get('label', '').strip()
 
     if not image_path or not mask_data:
         return jsonify({'error': 'Missing data'}), 400
@@ -144,32 +179,111 @@ def crop_image():
         mask_arr = np.frombuffer(mask_bytes, np.uint8)
         mask = cv2.imdecode(mask_arr, cv2.IMREAD_GRAYSCALE)
         
-        img = cv2.imread(image_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        source_dir = os.path.dirname(image_path)
+        filename = os.path.basename(image_path)
+        name, ext = os.path.splitext(filename)
         
+        # Sanitize label
+        if label:
+            label = "".join([c for c in label if c.isalnum() or c in (' ', '_', '-')]).strip()
+        
+        # Generate YOLO polygons
+        # Resize mask to original image size first if needed, as done below
+        img = cv2.imread(image_path)
         if mask.shape[:2] != img.shape[:2]:
             mask = cv2.resize(mask, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
-
-        y_indices, x_indices = np.where(mask > 0)
-        if len(y_indices) == 0:
-             return jsonify({'error': 'Empty mask'}), 400
-             
-        y_min, y_max = y_indices.min(), y_indices.max()
-        x_min, x_max = x_indices.min(), x_indices.max()
+            
+        polygons = mask_to_yolo(mask)
+        bbox = mask_to_yolo_bbox(mask)
         
-        img_crop = img[y_min:y_max+1, x_min:x_max+1]
-        mask_crop = mask[y_min:y_max+1, x_min:x_max+1]
+        yolo_lines = []
+        class_id = 0 # Default to 0
+        if label.isdigit():
+            class_id = int(label)
         
-        b, g, r = cv2.split(img_crop)
-        rgba = [b, g, r, mask_crop]
-        dst = cv2.merge(rgba, 4)
+        # Prepare YOLO annotation based on mode
+        if save_mode == 'bbox':
+            # BBox mode: only save bbox
+            if bbox:
+                line = f"{class_id} {bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}"
+                yolo_lines.append(line)
+        else:
+            # Mask/Crop mode: save polygon
+            for poly in polygons:
+                line = f"{class_id} " + " ".join([f"{c:.6f}" for c in poly])
+                yolo_lines.append(line)
         
-        pil_img = Image.fromarray(dst)
-        buff = io.BytesIO()
-        pil_img.save(buff, format="PNG")
-        img_str = base64.b64encode(buff.getvalue()).decode("utf-8")
-        
-        return jsonify({'cropped_image': f'data:image/png;base64,{img_str}'})
+        if save_mode == 'bbox':
+            # BBox mode: only save .txt file
+            bboxes_dir = os.path.join(source_dir, 'labels')
+            if label:
+                bboxes_dir = os.path.join(bboxes_dir, label)
+            os.makedirs(bboxes_dir, exist_ok=True)
+            
+            txt_path = os.path.join(bboxes_dir, f"{name}.txt")
+            with open(txt_path, 'w') as f:
+                f.write("\n".join(yolo_lines))
+            
+            return jsonify({'message': 'BBox annotation saved', 'saved_path': txt_path})
+            
+        elif save_mode == 'mask':
+            masks_dir = os.path.join(source_dir, 'masks')
+            if label:
+                masks_dir = os.path.join(masks_dir, label)
+            os.makedirs(masks_dir, exist_ok=True)
+            
+            save_path = os.path.join(masks_dir, f"{name}.png")
+            cv2.imwrite(save_path, mask)
+            
+            # Save YOLO txt
+            txt_path = os.path.join(masks_dir, f"{name}.txt")
+            with open(txt_path, 'w') as f:
+                f.write("\n".join(yolo_lines))
+            
+            _, buffer = cv2.imencode('.png', mask)
+            img_str = base64.b64encode(buffer).decode("utf-8")
+            return jsonify({'cropped_image': f'data:image/png;base64,{img_str}', 'message': 'Mask and YOLO txt saved', 'saved_path': save_path})
+            
+        else: # crop mode
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            y_indices, x_indices = np.where(mask > 0)
+            if len(y_indices) == 0:
+                 return jsonify({'error': 'Empty mask'}), 400
+                 
+            y_min, y_max = y_indices.min(), y_indices.max()
+            x_min, x_max = x_indices.min(), x_indices.max()
+            
+            img_crop = img[y_min:y_max+1, x_min:x_max+1]
+            mask_crop = mask[y_min:y_max+1, x_min:x_max+1]
+            
+            b, g, r = cv2.split(img_crop)
+            rgba = [b, g, r, mask_crop]
+            dst = cv2.merge(rgba, 4)
+            
+            crops_dir = os.path.join(source_dir, 'crops')
+            if label:
+                crops_dir = os.path.join(crops_dir, label)
+            os.makedirs(crops_dir, exist_ok=True)
+            save_path = os.path.join(crops_dir, f"{name}_crop.png")
+            
+            # Convert back to BGR for cv2 save
+            dst_bgr = cv2.cvtColor(dst, cv2.COLOR_RGBA2BGRA)
+            cv2.imwrite(save_path, dst_bgr)
+            
+            # Save YOLO txt (even for crop mode? Maybe useful if they want the polygon relative to original image)
+            # The user asked for "simultaneously generate yolo format mask annotation", usually implies with the mask.
+            # But let's save it in crop folder too if they want.
+            txt_path = os.path.join(crops_dir, f"{name}_crop.txt")
+            with open(txt_path, 'w') as f:
+                f.write("\n".join(yolo_lines))
+            
+            pil_img = Image.fromarray(dst)
+            buff = io.BytesIO()
+            pil_img.save(buff, format="PNG")
+            img_str = base64.b64encode(buff.getvalue()).decode("utf-8")
+            
+            return jsonify({'cropped_image': f'data:image/png;base64,{img_str}', 'saved_path': save_path})
 
     except Exception as e:
         print(f"Crop error: {e}")
@@ -178,10 +292,16 @@ def crop_image():
 @app.route('/api/batch_crop', methods=['POST'])
 def batch_crop():
     data = request.json
-    items = data.get('items', []) # List of {image_path, mask}
+    items = data.get('items', [])
+    save_mode = data.get('save_mode', 'crop')
+    label = data.get('label', '').strip()
     
     if not items:
         return jsonify({'error': 'No items to process'}), 400
+        
+    # Sanitize label
+    if label:
+        label = "".join([c for c in label if c.isalnum() or c in (' ', '_', '-')]).strip()
         
     results = []
     errors = []
@@ -194,10 +314,9 @@ def batch_crop():
             continue
             
         try:
-            # Create crops directory
             source_dir = os.path.dirname(image_path)
-            crops_dir = os.path.join(source_dir, 'crops')
-            os.makedirs(crops_dir, exist_ok=True)
+            filename = os.path.basename(image_path)
+            name, ext = os.path.splitext(filename)
             
             # Decode mask
             if ',' in mask_data:
@@ -206,36 +325,84 @@ def batch_crop():
             mask_arr = np.frombuffer(mask_bytes, np.uint8)
             mask = cv2.imdecode(mask_arr, cv2.IMREAD_GRAYSCALE)
             
-            # Read image
             img = cv2.imread(image_path)
-            # Keep BGR for saving with cv2
-            
             if mask.shape[:2] != img.shape[:2]:
                 mask = cv2.resize(mask, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+            
+            # Generate YOLO
+            polygons = mask_to_yolo(mask)
+            bbox = mask_to_yolo_bbox(mask)
+            
+            yolo_lines = []
+            class_id = 0
+            if label.isdigit():
+                class_id = int(label)
+            
+            # Prepare YOLO annotation based on mode
+            if save_mode == 'bbox':
+                if bbox:
+                    line = f"{class_id} {bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}"
+                    yolo_lines.append(line)
+            else:
+                for poly in polygons:
+                    line = f"{class_id} " + " ".join([f"{c:.6f}" for c in poly])
+                    yolo_lines.append(line)
+            
+            if save_mode == 'bbox':
+                # BBox mode: only save .txt file
+                bboxes_dir = os.path.join(source_dir, 'labels')
+                if label:
+                    bboxes_dir = os.path.join(bboxes_dir, label)
+                os.makedirs(bboxes_dir, exist_ok=True)
                 
-            y_indices, x_indices = np.where(mask > 0)
-            if len(y_indices) == 0:
-                 errors.append(f"Empty mask for {os.path.basename(image_path)}")
-                 continue
-                 
-            y_min, y_max = y_indices.min(), y_indices.max()
-            x_min, x_max = x_indices.min(), x_indices.max()
-            
-            img_crop = img[y_min:y_max+1, x_min:x_max+1]
-            mask_crop = mask[y_min:y_max+1, x_min:x_max+1]
-            
-            # Add alpha channel
-            b, g, r = cv2.split(img_crop)
-            rgba = [b, g, r, mask_crop]
-            dst = cv2.merge(rgba, 4)
-            
-            # Save to disk
-            filename = os.path.basename(image_path)
-            name, ext = os.path.splitext(filename)
-            save_path = os.path.join(crops_dir, f"{name}_crop.png")
-            
-            cv2.imwrite(save_path, dst)
-            results.append(save_path)
+                txt_path = os.path.join(bboxes_dir, f"{name}.txt")
+                with open(txt_path, 'w') as f:
+                    f.write("\n".join(yolo_lines))
+                results.append(txt_path)
+                
+            elif save_mode == 'mask':
+                masks_dir = os.path.join(source_dir, 'masks')
+                if label:
+                    masks_dir = os.path.join(masks_dir, label)
+                os.makedirs(masks_dir, exist_ok=True)
+                save_path = os.path.join(masks_dir, f"{name}.png")
+                cv2.imwrite(save_path, mask)
+                
+                txt_path = os.path.join(masks_dir, f"{name}.txt")
+                with open(txt_path, 'w') as f:
+                    f.write("\n".join(yolo_lines))
+                    
+                results.append(save_path)
+                
+            else: # crop
+                crops_dir = os.path.join(source_dir, 'crops')
+                if label:
+                    crops_dir = os.path.join(crops_dir, label)
+                os.makedirs(crops_dir, exist_ok=True)
+                
+                y_indices, x_indices = np.where(mask > 0)
+                if len(y_indices) == 0:
+                     errors.append(f"Empty mask for {filename}")
+                     continue
+                     
+                y_min, y_max = y_indices.min(), y_indices.max()
+                x_min, x_max = x_indices.min(), x_indices.max()
+                
+                img_crop = img[y_min:y_max+1, x_min:x_max+1]
+                mask_crop = mask[y_min:y_max+1, x_min:x_max+1]
+                
+                b, g, r = cv2.split(img_crop)
+                rgba = [b, g, r, mask_crop]
+                dst = cv2.merge(rgba, 4)
+                
+                save_path = os.path.join(crops_dir, f"{name}_crop.png")
+                cv2.imwrite(save_path, dst)
+                
+                txt_path = os.path.join(crops_dir, f"{name}_crop.txt")
+                with open(txt_path, 'w') as f:
+                    f.write("\n".join(yolo_lines))
+                    
+                results.append(save_path)
             
         except Exception as e:
             print(f"Error processing {image_path}: {e}")

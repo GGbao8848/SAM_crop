@@ -21,6 +21,8 @@ let shortcuts = {
     next: 'ArrowRight'
 };
 
+let saveMode = 'crop'; // 'crop' or 'mask'
+
 const imageCanvas = document.getElementById('imageCanvas');
 const maskCanvas = document.getElementById('maskCanvas');
 const interactionCanvas = document.getElementById('interactionCanvas');
@@ -35,6 +37,7 @@ const downloadLink = document.getElementById('downloadLink');
 const modelSelect = document.getElementById('modelSelect');
 const fileList = document.getElementById('fileList');
 const btnSort = document.getElementById('btnSort');
+const btnCrop = document.getElementById('btnCrop');
 
 // Settings Elements
 const settingsModal = document.getElementById('settingsModal');
@@ -56,13 +59,27 @@ document.getElementById('interactionCanvas').addEventListener('mouseup', handleM
 document.getElementById('interactionCanvas').addEventListener('contextmenu', (e) => e.preventDefault()); // Prevent context menu for right click
 document.getElementById('closeResultModal').addEventListener('click', () => resultModal.classList.add('hidden'));
 document.getElementById('closeSettingsModal').addEventListener('click', () => settingsModal.classList.add('hidden'));
-document.getElementById('btnCrop').addEventListener('click', handleCrop);
+btnCrop.addEventListener('click', handleCrop);
 document.getElementById('btnSaveAll').addEventListener('click', handleBatchSave);
 document.getElementById('btnUndo').addEventListener('click', handleUndo);
 document.getElementById('btnClear').addEventListener('click', clearAll);
 btnSort.addEventListener('click', toggleSort);
 btnSettings.addEventListener('click', openSettings);
 btnSaveSettings.addEventListener('click', saveSettings);
+
+// Save Mode Listeners
+document.querySelectorAll('input[name="saveMode"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+        saveMode = e.target.value;
+        if (saveMode === 'crop') {
+            btnCrop.textContent = 'Save Crop';
+        } else if (saveMode === 'mask') {
+            btnCrop.textContent = 'Save Mask';
+        } else if (saveMode === 'bbox') {
+            btnCrop.textContent = 'Save BBox';
+        }
+    });
+});
 
 // Shortcut Inputs
 [shortcutPrevInput, shortcutNextInput].forEach(input => {
@@ -502,6 +519,8 @@ async function handleCrop() {
         return;
     }
 
+    const label = document.getElementById('classLabel').value;
+
     loading.classList.remove('hidden');
 
     try {
@@ -512,21 +531,35 @@ async function handleCrop() {
             },
             body: JSON.stringify({
                 image_path: currentImagePath,
-                mask: currentRawMask
+                mask: currentRawMask,
+                save_mode: saveMode,
+                label: label
             })
         });
-
         const data = await response.json();
 
-        if (data.cropped_image) {
+        if (saveMode === 'bbox') {
+            // BBox mode: no image to display
+            if (data.message) {
+                alert(data.message + '\nSaved to: ' + data.saved_path);
+            } else {
+                alert('Error: ' + (data.error || 'Unknown error'));
+            }
+        } else if (data.cropped_image) {
             resultImage.src = data.cropped_image;
             downloadLink.href = data.cropped_image;
+            downloadLink.download = saveMode === 'crop' ? 'crop.png' : 'mask.png';
             resultModal.classList.remove('hidden');
+
+            if (data.saved_path) {
+                console.log('Saved to:', data.saved_path);
+            }
         } else {
-            alert('Crop failed');
+            alert('Error: ' + (data.error || 'Unknown error'));
         }
     } catch (error) {
-        console.error('Crop error:', error);
+        console.error('Error:', error);
+        alert('Error processing request');
     } finally {
         loading.classList.add('hidden');
     }
@@ -543,18 +576,25 @@ async function handleBatchSave() {
         return;
     }
 
+    const label = document.getElementById('classLabel').value;
+
     loading.classList.remove('hidden');
 
     try {
         const response = await fetch('/api/batch_crop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ items: items })
+            body: JSON.stringify({
+                items: items,
+                save_mode: saveMode,
+                label: label
+            })
         });
         const data = await response.json();
 
         if (data.saved) {
-            let msg = `Successfully saved ${data.saved.length} images.`;
+            const itemType = saveMode === 'crop' ? 'crops' : (saveMode === 'mask' ? 'masks' : 'bboxes');
+            let msg = `Successfully saved ${data.saved.length} ${itemType}.`;
             if (data.errors && data.errors.length > 0) {
                 msg += `\nErrors: ${data.errors.length}`;
             }
